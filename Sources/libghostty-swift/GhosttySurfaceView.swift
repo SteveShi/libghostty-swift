@@ -32,7 +32,10 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     deinit {
         guard let surface = surface.value else { return }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [runtime] in
+            if runtime.activeSurface == surface {
+                runtime.activeSurface = nil
+            }
             ghostty_surface_free(surface)
         }
     }
@@ -41,13 +44,21 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
-        if result, let surface = surface.value { ghostty_surface_set_focus(surface, true) }
+        if result, let surface = surface.value {
+            ghostty_surface_set_focus(surface, true)
+            runtime.activeSurface = surface
+        }
         return result
     }
 
     override public func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
-        if result, let surface = surface.value { ghostty_surface_set_focus(surface, false) }
+        if result, let surface = surface.value {
+            ghostty_surface_set_focus(surface, false)
+            if runtime.activeSurface == surface {
+                runtime.activeSurface = nil
+            }
+        }
         return result
     }
 

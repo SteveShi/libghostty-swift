@@ -29,15 +29,18 @@ private func ghostty_read_clipboard_callback(
     request: UnsafeMutableRawPointer?
 ) -> Bool {
     guard let userdata, let request else { return false }
-    let viewAddress = Int(bitPattern: userdata)
+    let runtimeAddress = Int(bitPattern: userdata)
     let requestAddress = Int(bitPattern: request)
     
     DispatchQueue.main.async {
-        guard let viewPtr = UnsafeMutableRawPointer(bitPattern: viewAddress) else { return }
+        guard let runtimePtr = UnsafeMutableRawPointer(bitPattern: runtimeAddress) else { return }
         guard let reqPtr = UnsafeMutableRawPointer(bitPattern: requestAddress) else { return }
         
-        let surfaceView = Unmanaged<GhosttySurfaceView>.fromOpaque(viewPtr).takeUnretainedValue()
-        guard let surface = surfaceView.rawSurface else { return }
+        let runtime = Unmanaged<GhosttyRuntime>.fromOpaque(runtimePtr).takeUnretainedValue()
+        guard let surface = runtime.activeSurface else {
+            ghostty_surface_complete_clipboard_request(nil, nil, reqPtr, false)
+            return
+        }
         
         let pasteboard = NSPasteboard.general
         if let text = pasteboard.string(forType: .string) {
@@ -49,6 +52,48 @@ private func ghostty_read_clipboard_callback(
         }
     }
     return true
+}
+
+private func ghostty_confirm_read_clipboard_callback(
+    userdata: UnsafeMutableRawPointer?,
+    requestInfo: UnsafePointer<CChar>?,
+    requestData: UnsafeMutableRawPointer?,
+    requestKind: ghostty_clipboard_request_e
+) {
+    guard let userdata, let requestData else { return }
+    let runtimeAddress = Int(bitPattern: userdata)
+    let requestAddress = Int(bitPattern: requestData)
+    
+    DispatchQueue.main.async {
+        guard let runtimePtr = UnsafeMutableRawPointer(bitPattern: runtimeAddress) else { return }
+        guard let reqPtr = UnsafeMutableRawPointer(bitPattern: requestAddress) else { return }
+        
+        let runtime = Unmanaged<GhosttyRuntime>.fromOpaque(runtimePtr).takeUnretainedValue()
+        guard let surface = runtime.activeSurface else {
+            ghostty_surface_complete_clipboard_request(nil, nil, reqPtr, false)
+            return
+        }
+        
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Clipboard Read Request", comment: "")
+        alert.informativeText = NSLocalizedString("A command-line program is requesting to read your clipboard. Do you want to allow this?", comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Allow", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Deny", comment: ""))
+        
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let pasteboard = NSPasteboard.general
+            if let text = pasteboard.string(forType: .string) {
+                text.withCString { cStr in
+                    ghostty_surface_complete_clipboard_request(surface, cStr, reqPtr, true)
+                }
+            } else {
+                ghostty_surface_complete_clipboard_request(surface, nil, reqPtr, false)
+            }
+        } else {
+            ghostty_surface_complete_clipboard_request(surface, nil, reqPtr, false)
+        }
+    }
 }
 
 private func ghostty_write_clipboard_callback(
@@ -90,6 +135,7 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
 
     public private(set) var app: ghostty_app_t?
     public private(set) var config: ghostty_config_t?
+    public var activeSurface: ghostty_surface_t?
     
     private let displayLink = DisplayLink()
     private var pendingTick = false
@@ -113,7 +159,7 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
         // Use empty closures for other callbacks to avoid any potential isolation issues in inline closures
         runtimeCfg.action_cb = { _, _, _ in false }
         runtimeCfg.read_clipboard_cb = ghostty_read_clipboard_callback
-        runtimeCfg.confirm_read_clipboard_cb = { _, _, _, _ in }
+        runtimeCfg.confirm_read_clipboard_cb = ghostty_confirm_read_clipboard_callback
         runtimeCfg.write_clipboard_cb = ghostty_write_clipboard_callback
         runtimeCfg.close_surface_cb = { _, _ in }
 
