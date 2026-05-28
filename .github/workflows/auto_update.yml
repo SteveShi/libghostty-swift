@@ -1,6 +1,13 @@
 name: Auto Update Ghostty Releases
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Sources/**'
+      - 'scripts/**'
+      - 'Package.swift'
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
@@ -15,7 +22,7 @@ permissions:
 
 jobs:
   check-and-build:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Checkout Swift Package
         uses: actions/checkout@v6
@@ -56,7 +63,11 @@ jobs:
             echo "updates_available=true" >> "$GITHUB_OUTPUT"
             echo "latest_ghostty=$LATEST_GHOSTTY" >> "$GITHUB_OUTPUT"
           else
-            echo "updates_available=false" >> "$GITHUB_OUTPUT"
+            if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.force }}" == "true" ]]; then
+              echo "updates_available=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "updates_available=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "latest_ghostty=$CURRENT_GHOSTTY" >> "$GITHUB_OUTPUT"
           fi
 
