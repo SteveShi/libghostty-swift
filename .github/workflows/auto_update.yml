@@ -24,15 +24,17 @@ jobs:
 
       - name: Fetch Upstream Ghostty Tag
         id: check-versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           # Get latest stable release tag of Ghostty using GitHub Releases API
           # releases/latest strictly returns the latest stable release (excluding tip/draft/prereleases)
-          LATEST_GHOSTTY=$(curl -s https://api.github.com/repos/ghostty-org/ghostty/releases/latest | jq -r .tag_name)
+          LATEST_GHOSTTY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/ghostty-org/ghostty/releases/latest | jq -r .tag_name)
           if [[ -z "$LATEST_GHOSTTY" || "$LATEST_GHOSTTY" == "null" ]]; then
             # If releases/latest fails, fallback to tags and filter out 'tip' and pre-releases
-            LATEST_GHOSTTY=$(curl -s https://api.github.com/repos/ghostty-org/ghostty/tags | jq -r '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+            LATEST_GHOSTTY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/ghostty-org/ghostty/tags | jq -r '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
           fi
 
           echo "Latest Upstream Ghostty: $LATEST_GHOSTTY"
