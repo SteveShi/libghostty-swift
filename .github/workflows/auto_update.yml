@@ -1,0 +1,136 @@
+name: Auto Update Ghostty Releases
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Swift Package
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig-action@v2
+        with:
+          version: 0.15.2
+
+      - name: Fetch Upstream Ghostty Tag
+        id: check-versions
+        run: |
+          set -euo pipefail
+
+          # Get latest stable release tag of Ghostty using GitHub Releases API
+          # releases/latest strictly returns the latest stable release (excluding tip/draft/prereleases)
+          LATEST_GHOSTTY=$(curl -s https://api.github.com/repos/ghostty-org/ghostty/releases/latest | jq -r .tag_name)
+          if [[ -z "$LATEST_GHOSTTY" || "$LATEST_GHOSTTY" == "null" ]]; then
+            # If releases/latest fails, fallback to tags and filter out 'tip' and pre-releases
+            LATEST_GHOSTTY=$(curl -s https://api.github.com/repos/ghostty-org/ghostty/tags | jq -r '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          fi
+
+          echo "Latest Upstream Ghostty: $LATEST_GHOSTTY"
+
+          # Read currently compiled version
+          CURRENT_GHOSTTY=""
+          if [[ -f upstream_ghostty.txt ]]; then
+            CURRENT_GHOSTTY=$(cat upstream_ghostty.txt)
+          fi
+
+          echo "Current Ghostty: $CURRENT_GHOSTTY"
+
+          if [[ "$LATEST_GHOSTTY" != "$CURRENT_GHOSTTY" ]]; then
+            echo "updates_available=true" >> "$GITHUB_OUTPUT"
+            echo "latest_ghostty=$LATEST_GHOSTTY" >> "$GITHUB_OUTPUT"
+          else
+            echo "updates_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compile and Release
+        if: steps.check-versions.outputs.updates_available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_GHOSTTY: ${{ steps.check-versions.outputs.latest_ghostty }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ThirdParty
+
+          chmod +x scripts/*.sh
+
+          # Compile GhosttyKit
+          ./scripts/build_ghostty.sh "${LATEST_GHOSTTY}"
+
+          # Zip framework
+          cd ThirdParty
+          zip -qy -r GhosttyKit.xcframework.zip GhosttyKit.xcframework
+          cd ..
+
+          # Compute checksum
+          CHECKSUM=$(swift package compute-checksum ThirdParty/GhosttyKit.xcframework.zip)
+          echo "New Checksum: $CHECKSUM"
+
+          # Determine next version tag
+          CURRENT_PKG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          VERSION_NUM=${CURRENT_PKG_VERSION#v}
+          IFS='.' read -r -a VERSION_PARTS <<< "$VERSION_NUM"
+          NEXT_PATCH=$((VERSION_PARTS[2] + 1))
+          NEXT_PKG_VERSION="v${VERSION_PARTS[0]}.${VERSION_PARTS[1]}.${NEXT_PATCH}"
+          echo "Next Package Version: $NEXT_PKG_VERSION"
+
+          # Update Package.swift
+          cat <<EOF > Package.swift
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "libghostty-swift",
+    platforms: [
+        .macOS(.v15)
+    ],
+    products: [
+        .library(
+            name: "libghostty-swift",
+            targets: ["libghostty-swift"]
+        )
+    ],
+    dependencies: [
+        .package(url: "https://github.com/Lakr233/MSDisplayLink.git", from: "2.1.0")
+    ],
+    targets: [
+        .target(
+            name: "libghostty-swift",
+            dependencies: [
+                "GhosttyKit",
+                .product(name: "MSDisplayLink", package: "MSDisplayLink")
+            ]
+        ),
+        .binaryTarget(
+            name: "GhosttyKit",
+            url: "https://github.com/SteveShi/libghostty-swift/releases/download/${NEXT_PKG_VERSION}/GhosttyKit.xcframework.zip",
+            checksum: "${CHECKSUM}"
+        )
+    ]
+)
+EOF
+
+          # Save version records
+          echo "${LATEST_GHOSTTY}" > upstream_ghostty.txt
+
+          # Configure Git and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Package.swift upstream_ghostty.txt
+          git commit -m "Auto-update: Ghostty to ${LATEST_GHOSTTY} [skip ci]"
+          git push origin main
+
+          # Create Release and upload asset
+          gh release create "${NEXT_PKG_VERSION}" ThirdParty/GhosttyKit.xcframework.zip \
+            --title "${NEXT_PKG_VERSION}" \
+            --notes "Automatically compiled with Ghostty ${LATEST_GHOSTTY}"

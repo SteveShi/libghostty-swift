@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="${1:-main}"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$ROOT/ThirdParty/src/ghostty"
+OUT_DIR="$ROOT/ThirdParty/lib"
+
+mkdir -p "$ROOT/ThirdParty/src" "$OUT_DIR"
+
+if [[ ! -d "$SRC" ]]; then
+  git clone https://github.com/ghostty-org/ghostty.git "$SRC"
+else
+  git -C "$SRC" fetch --tags
+fi
+
+echo "Checking out Ghostty version $VERSION..."
+git -C "$SRC" checkout "$VERSION"
+
+ZIG_BIN="${ZIG_BIN:-}"
+if [[ -z "$ZIG_BIN" && -x /opt/homebrew/opt/zig@0.15/bin/zig ]]; then
+  ZIG_BIN="/opt/homebrew/opt/zig@0.15/bin/zig"
+fi
+if [[ -z "$ZIG_BIN" ]]; then
+  ZIG_BIN="$(command -v zig || true)"
+fi
+if [[ -z "$ZIG_BIN" ]]; then
+  echo "Zig is required to build Ghostty. Please set ZIG_BIN or ensure zig is in PATH."
+  exit 1
+fi
+
+(
+  cd "$SRC"
+  "$ZIG_BIN" build -Dapp-runtime=none -Demit-xcframework=true -Demit-macos-app=false -Dxcframework-target=native
+)
+
+rm -rf "$OUT_DIR/GhosttyKit.xcframework"
+cp -R "$SRC/macos/GhosttyKit.xcframework" "$OUT_DIR/GhosttyKit.xcframework"
+
+echo "GhosttyKit.xcframework generated and copied to $OUT_DIR"
