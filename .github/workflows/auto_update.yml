@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force compilation and release of current version'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -52,10 +57,11 @@ jobs:
             echo "latest_ghostty=$LATEST_GHOSTTY" >> "$GITHUB_OUTPUT"
           else
             echo "updates_available=false" >> "$GITHUB_OUTPUT"
+            echo "latest_ghostty=$CURRENT_GHOSTTY" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Compile and Release
-        if: steps.check-versions.outputs.updates_available == 'true'
+        if: steps.check-versions.outputs.updates_available == 'true' || github.event.inputs.force == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LATEST_GHOSTTY: ${{ steps.check-versions.outputs.latest_ghostty }}
