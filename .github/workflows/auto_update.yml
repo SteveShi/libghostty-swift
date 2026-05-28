@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig-action@v2
+        uses: mlugg/setup-zig@v1
         with:
           version: 0.15.2
 
