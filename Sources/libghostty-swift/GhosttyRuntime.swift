@@ -29,18 +29,20 @@ private func ghostty_read_clipboard_callback(
     request: UnsafeMutableRawPointer?
 ) -> Bool {
     guard let userdata, let request else { return false }
-    let runtimeAddress = Int(bitPattern: userdata)
+    // Identify the surface view by its address rather than dereferencing the raw
+    // pointer on the background thread. The view may be deallocated before this
+    // async block runs, so we look it up through the runtime's weak registry on
+    // the main thread to avoid a use-after-free.
+    let viewAddress = Int(bitPattern: userdata)
     let requestAddress = Int(bitPattern: request)
     
     DispatchQueue.main.async {
-        guard let runtimePtr = UnsafeMutableRawPointer(bitPattern: runtimeAddress) else { return }
         guard let reqPtr = UnsafeMutableRawPointer(bitPattern: requestAddress) else { return }
         
-        let runtime = Unmanaged<GhosttyRuntime>.fromOpaque(runtimePtr).takeUnretainedValue()
-        guard let surface = runtime.activeSurface else {
-            ghostty_surface_complete_clipboard_request(nil, nil, reqPtr, false)
-            return
-        }
+        // If the view (and therefore its surface) is gone, the request pointer is
+        // no longer valid either, so we must not touch it.
+        guard let surfaceView = GhosttyRuntime.shared.surfaceView(forKey: viewAddress),
+              let surface = surfaceView.rawSurface else { return }
         
         let pasteboard = NSPasteboard.general
         if let text = pasteboard.string(forType: .string) {
@@ -123,10 +125,24 @@ private func ghostty_write_clipboard_callback(
     guard let text = textToCopy else { return }
     
     DispatchQueue.main.async {
+        // When the core requires confirmation (e.g. `clipboard-write = ask`),
+        // defer the decision to the host application. If no handler is installed
+        // we deny the write — never silently overwrite the user's clipboard on
+        // behalf of a program (OSC 52 clipboard-hijack protection).
+        if confirm {
+            let approved = GhosttyRuntime.shared.clipboardWriteConfirmationHandler?(text) ?? false
+            guard approved else { return }
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
+}
+
+/// Weak wrapper so the runtime registry never extends a surface view's lifetime.
+private final class WeakSurfaceView {
+    weak var value: GhosttySurfaceView?
+    init(_ value: GhosttySurfaceView) { self.value = value }
 }
 
 @MainActor
@@ -136,6 +152,16 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
     public private(set) var app: ghostty_app_t?
     public private(set) var config: ghostty_config_t?
     public var activeSurface: ghostty_surface_t?
+
+    /// Invoked when a program requests to write the system clipboard and the
+    /// configuration requires confirmation. Return `true` to allow the write.
+    /// If no handler is installed, confirmation-required writes are denied.
+    public var clipboardWriteConfirmationHandler: ((String) -> Bool)?
+
+    /// Weak registry of live surface views keyed by their pointer address, used
+    /// to resolve C callbacks safely across threads without dereferencing a raw
+    /// (potentially dangling) pointer.
+    private var surfaceViews: [Int: WeakSurfaceView] = [:]
     
     private let displayLink = DisplayLink()
     private var pendingTick = false
@@ -172,6 +198,20 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
 
     public func setPendingTick() {
         pendingTick = true
+    }
+
+    // MARK: - Surface view registry
+
+    func registerSurfaceView(_ view: GhosttySurfaceView, forKey key: Int) {
+        surfaceViews[key] = WeakSurfaceView(view)
+    }
+
+    func unregisterSurfaceView(forKey key: Int) {
+        surfaceViews.removeValue(forKey: key)
+    }
+
+    func surfaceView(forKey key: Int) -> GhosttySurfaceView? {
+        surfaceViews[key]?.value
     }
 
     nonisolated public func synchronization(context: DisplayLinkCallbackContext) {

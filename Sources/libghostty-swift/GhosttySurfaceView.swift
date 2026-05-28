@@ -18,6 +18,21 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         surface.value
     }
 
+    private static let fallbackBackingScaleFactor: CGFloat = 2.0
+
+    private static let terminalControlKeyCodes: Set<UInt16> = [
+        51, 117,            // Delete, Forward Delete
+        36, 76,             // Return, Enter
+        53, 48,             // Escape, Tab
+        123, 124, 125, 126, // Left, Right, Down, Up arrows
+        115, 119, 116, 121, // Home, End, Page Up, Page Down
+    ]
+
+    /// Stable identity used as the registry key for cross-thread C callbacks.
+    private nonisolated var registryKey: Int {
+        Int(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+    }
+
     public init(runtime: GhosttyRuntime = .shared, config: GhosttySurfaceConfiguration = GhosttySurfaceConfiguration()) {
         self.runtime = runtime
         self.surfaceConfig = config
@@ -27,16 +42,20 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     public required init?(coder: NSCoder) {
-        return nil
+        fatalError("GhosttySurfaceView must be created programmatically; init(coder:) is not supported")
     }
 
     deinit {
-        guard let surface = surface.value else { return }
+        let key = registryKey
+        let surfaceToFree = surface.value
         DispatchQueue.main.async { [runtime] in
-            if runtime.activeSurface == surface {
+            if let surfaceToFree, runtime.activeSurface == surfaceToFree {
                 runtime.activeSurface = nil
             }
-            ghostty_surface_free(surface)
+            runtime.unregisterSurfaceView(forKey: key)
+            if let surfaceToFree {
+                ghostty_surface_free(surfaceToFree)
+            }
         }
     }
 
@@ -99,17 +118,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         
         let hasControlModifiers = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control)
         
-        let isControlKey: Bool
-        switch event.keyCode {
-        case 51, 117, // Delete, Forward Delete
-             36, 76,  // Return, Enter
-             53, 48,  // Escape, Tab
-             123, 124, 125, 126, // Arrow keys
-             115, 119, 116, 121: // Home, End, PageUp, PageDown
-            isControlKey = true
-        default:
-            isControlKey = false
-        }
+        let isControlKey = Self.terminalControlKeyCodes.contains(event.keyCode)
         
         let isWritingPreedit = self.hasMarkedText()
         if isWritingPreedit || (!isControlKey && !hasControlModifiers) {
@@ -200,8 +209,8 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         let isPrecise = event.hasPreciseScrollingDeltas
         if isPrecise { scrollMods |= 1 }
 
-        // Treat either non-stationary phase or non-empty momentumPhase as momentum
-        let hasMomentum = (event.momentumPhase != []) || (event.phase == .changed && event.momentumPhase != [])
+        // A non-empty momentumPhase means we are in the kinetic deceleration phase.
+        let hasMomentum = event.momentumPhase != []
         if hasMomentum { scrollMods |= 2 }
 
         if event.phase == .began { scrollMods |= 1 << 2 }
@@ -246,7 +255,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         config.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
             nsview: Unmanaged.passUnretained(self).toOpaque()
         ))
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? Self.fallbackBackingScaleFactor
         config.scale_factor = Double(scale)
         config.font_size = max(10.0, surfaceConfig.fontSize)
         config.wait_after_command = surfaceConfig.waitAfterCommand
@@ -260,71 +269,45 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
             ghostty_env_var_s(key: strdup(key), value: strdup(value))
         }
 
-        let createSurface: () -> Void = {
-            envVars.withUnsafeMutableBufferPointer { buffer in
-                config.env_vars = buffer.baseAddress
-                config.env_var_count = buffer.count
-                self.surface.value = ghostty_surface_new(app, &config)
-            }
-        }
-
-        if let workingDirectory, let command, let initialInput {
-            workingDirectory.withCString { wd in
-                config.working_directory = wd
-                command.withCString { cmd in
-                    config.command = cmd
-                    initialInput.withCString { input in
-                        config.initial_input = input
-                        createSurface()
+        // Bind the three optional C strings (each valid only within its closure)
+        // then create the surface. This collapses the previous 8-way branch into
+        // a single nested binding that scales with the optionals.
+        Self.withOptionalCString(workingDirectory) { wd in
+            Self.withOptionalCString(command) { cmd in
+                Self.withOptionalCString(initialInput) { input in
+                    if let wd { config.working_directory = wd }
+                    if let cmd { config.command = cmd }
+                    if let input { config.initial_input = input }
+                    envVars.withUnsafeMutableBufferPointer { buffer in
+                        config.env_vars = buffer.baseAddress
+                        config.env_var_count = buffer.count
+                        self.surface.value = ghostty_surface_new(app, &config)
                     }
                 }
             }
-        } else if let workingDirectory, let command {
-            workingDirectory.withCString { wd in
-                config.working_directory = wd
-                command.withCString { cmd in
-                    config.command = cmd
-                    createSurface()
-                }
-            }
-        } else if let workingDirectory, let initialInput {
-            workingDirectory.withCString { wd in
-                config.working_directory = wd
-                initialInput.withCString { input in
-                    config.initial_input = input
-                    createSurface()
-                }
-            }
-        } else if let command, let initialInput {
-            command.withCString { cmd in
-                config.command = cmd
-                initialInput.withCString { input in
-                    config.initial_input = input
-                    createSurface()
-                }
-            }
-        } else if let workingDirectory {
-            workingDirectory.withCString { wd in
-                config.working_directory = wd
-                createSurface()
-            }
-        } else if let command {
-            command.withCString { cmd in
-                config.command = cmd
-                createSurface()
-            }
-        } else if let initialInput {
-            initialInput.withCString { input in
-                config.initial_input = input
-                createSurface()
-            }
-        } else {
-            createSurface()
         }
 
         for env in envVars {
             if let key = env.key { free(UnsafeMutableRawPointer(mutating: key)) }
             if let value = env.value { free(UnsafeMutableRawPointer(mutating: value)) }
+        }
+
+        // Register for cross-thread C callbacks only once a surface exists.
+        if surface.value != nil {
+            runtime.registerSurfaceView(self, forKey: registryKey)
+        }
+    }
+
+    /// Invokes `body` with a C string pointer for `string`, or `nil` when the
+    /// string is absent. The pointer is valid only for the duration of `body`.
+    private static func withOptionalCString(
+        _ string: String?,
+        _ body: (UnsafePointer<CChar>?) -> Void
+    ) {
+        if let string {
+            string.withCString { body($0) }
+        } else {
+            body(nil)
         }
     }
 
@@ -508,7 +491,7 @@ extension GhosttySurfaceView {
         var h: Double = 0
         ghostty_surface_ime_point(surface, &x, &y, &w, &h)
         
-        let scale = self.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let scale = self.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? Self.fallbackBackingScaleFactor
         let logicalW = CGFloat(w) / scale
         let logicalH = CGFloat(h) / scale
         
