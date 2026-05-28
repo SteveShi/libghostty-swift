@@ -87,9 +87,9 @@ jobs:
           ./scripts/build_ghostty.sh "${LATEST_GHOSTTY}"
 
           # Zip framework
-          cd ThirdParty
-          zip -qy -r GhosttyKit.xcframework.zip GhosttyKit.xcframework
-          cd ..
+          cd ThirdParty/lib
+          zip -qy -r ../GhosttyKit.xcframework.zip GhosttyKit.xcframework
+          cd ../..
 
           # Compute checksum
           CHECKSUM=$(swift package compute-checksum ThirdParty/GhosttyKit.xcframework.zip)
