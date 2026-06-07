@@ -139,6 +139,48 @@ private func ghostty_write_clipboard_callback(
     }
 }
 
+/// Terminal events surfaced from Ghostty's action callback that a host app may
+/// want to react to (e.g. system notifications).
+public enum GhosttyTerminalEvent: Sendable {
+    /// A program rang the terminal bell (BEL).
+    case bell
+    /// A program requested a desktop notification (OSC 9 / OSC 777).
+    case desktopNotification(title: String, body: String)
+    /// The surface's child process exited with the given code.
+    case childExited(exitCode: UInt32)
+}
+
+/// Top-level C action callback (no actor isolation — may be invoked from
+/// Ghostty's app tick). Relevant actions are translated to a `Sendable`
+/// `GhosttyTerminalEvent` and delivered on the main thread; all other actions
+/// keep the previous no-op behavior (`return false`).
+private func ghostty_action_callback(
+    _ app: ghostty_app_t?,
+    _ target: ghostty_target_s,
+    _ action: ghostty_action_s
+) -> Bool {
+    let event: GhosttyTerminalEvent
+    switch action.tag {
+    case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+        let notification = action.action.desktop_notification
+        event = .desktopNotification(
+            title: notification.title.map { String(cString: $0) } ?? "",
+            body: notification.body.map { String(cString: $0) } ?? ""
+        )
+    case GHOSTTY_ACTION_RING_BELL:
+        event = .bell
+    case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+        event = .childExited(exitCode: action.action.child_exited.exit_code)
+    default:
+        return false
+    }
+
+    DispatchQueue.main.async {
+        GhosttyRuntime.shared.onTerminalEvent?(event)
+    }
+    return true
+}
+
 /// Weak wrapper so the runtime registry never extends a surface view's lifetime.
 private final class WeakSurfaceView {
     weak var value: GhosttySurfaceView?
@@ -157,6 +199,10 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
     /// configuration requires confirmation. Return `true` to allow the write.
     /// If no handler is installed, confirmation-required writes are denied.
     public var clipboardWriteConfirmationHandler: ((String) -> Bool)?
+
+    /// Invoked on the main thread when a terminal surface emits a notable event
+    /// (bell, app-requested desktop notification, child process exit).
+    public var onTerminalEvent: ((GhosttyTerminalEvent) -> Void)?
 
     /// Weak registry of live surface views keyed by their pointer address, used
     /// to resolve C callbacks safely across threads without dereferencing a raw
@@ -183,7 +229,7 @@ public final class GhosttyRuntime: DisplayLinkDelegate {
         runtimeCfg.wakeup_cb = ghostty_wakeup_callback
         
         // Use empty closures for other callbacks to avoid any potential isolation issues in inline closures
-        runtimeCfg.action_cb = { _, _, _ in false }
+        runtimeCfg.action_cb = ghostty_action_callback
         runtimeCfg.read_clipboard_cb = ghostty_read_clipboard_callback
         runtimeCfg.confirm_read_clipboard_cb = ghostty_confirm_read_clipboard_callback
         runtimeCfg.write_clipboard_cb = ghostty_write_clipboard_callback
