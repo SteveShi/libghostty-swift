@@ -181,14 +181,69 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         ghostty_surface_key(surface, keyEvent)
     }
 
+    // MARK: - Mouse events
+
+    /// Forward the current mouse location to Ghostty. Ghostty's origin is top-left
+    /// while AppKit's is bottom-left, so the Y axis is flipped (same convention as
+    /// `scrollWheel`).
+    private func sendMousePos(_ event: NSEvent) {
+        guard let surface = surface.value else { return }
+        let loc = convert(event.locationInWindow, from: nil)
+        ghostty_surface_mouse_pos(surface, loc.x, bounds.height - loc.y, event.ghosttyMouseMods)
+    }
+
+    /// Forward a mouse button press/release to Ghostty. The position is sent first
+    /// so the core resolves the click against the correct cell.
+    private func sendMouseButton(_ state: ghostty_input_mouse_state_e,
+                                 _ button: ghostty_input_mouse_button_e,
+                                 with event: NSEvent) {
+        guard let surface = surface.value else { return }
+        sendMousePos(event)
+        _ = ghostty_surface_mouse_button(surface, state, button, event.ghosttyMouseMods)
+    }
+
+    override public func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil))
+    }
+
     override public func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        super.mouseDown(with: event)
+        sendMouseButton(GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, with: event)
+    }
+
+    override public func mouseDragged(with event: NSEvent) {
+        sendMousePos(event)
+    }
+
+    override public func mouseUp(with event: NSEvent) {
+        sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, with: event)
+    }
+
+    override public func mouseMoved(with event: NSEvent) {
+        sendMousePos(event)
     }
 
     override public func rightMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        super.rightMouseDown(with: event)
+        sendMouseButton(GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, with: event)
+    }
+
+    override public func rightMouseUp(with event: NSEvent) {
+        sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, with: event)
+    }
+
+    override public func otherMouseDown(with event: NSEvent) {
+        sendMouseButton(GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_MIDDLE, with: event)
+    }
+
+    override public func otherMouseUp(with event: NSEvent) {
+        sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_MIDDLE, with: event)
     }
 
     override public func scrollWheel(with event: NSEvent) {

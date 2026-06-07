@@ -39,6 +39,10 @@ public extension NSEvent {
         return characters
     }
 
+    /// Modifier flags for this event mapped to Ghostty's mods enum.
+    /// Reuses `ghosttyMods(_:)` so mouse handlers stay in sync with key handling.
+    var ghosttyMouseMods: ghostty_input_mods_e { ghosttyMods(modifierFlags) }
+
     private func ghosttyMods(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var mods: UInt32 = GHOSTTY_MODS_NONE.rawValue
         if flags.contains(.shift) { mods |= GHOSTTY_MODS_SHIFT.rawValue }
