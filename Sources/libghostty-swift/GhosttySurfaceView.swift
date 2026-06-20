@@ -38,6 +38,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         self.surfaceConfig = config
         super.init(frame: .zero)
         wantsLayer = true
+        setAccessibilityRole(.textArea)
         setupSurfaceIfPossible()
     }
 
@@ -136,6 +137,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
                         ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
                     }
                 }
+                NSAccessibility.post(element: self, notification: .valueChanged)
                 return
             }
             
@@ -144,6 +146,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
                 if !isWritingPreedit {
                     sendDirectKey(event, to: surface)
                 }
+                NSAccessibility.post(element: self, notification: .valueChanged)
                 return
             }
             
@@ -151,6 +154,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         }
         
         sendDirectKey(event, to: surface)
+        NSAccessibility.post(element: self, notification: .valueChanged)
     }
     
     private func sendDirectKey(_ event: NSEvent, to surface: ghostty_surface_t) {
@@ -219,10 +223,12 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func mouseDragged(with event: NSEvent) {
         sendMousePos(event)
+        NSAccessibility.post(element: self, notification: .selectedTextChanged)
     }
 
     override public func mouseUp(with event: NSEvent) {
         sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, with: event)
+        NSAccessibility.post(element: self, notification: .selectedTextChanged)
     }
 
     override public func mouseMoved(with event: NSEvent) {
@@ -231,11 +237,63 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func rightMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        // Send press to ghostty so it can update cursor or selection before menu pop-up.
         sendMouseButton(GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, with: event)
+        
+        if let menu = self.menu(for: event) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
+        
+        sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, with: event)
     }
 
     override public func rightMouseUp(with event: NSEvent) {
-        sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, with: event)
+        // Handled in rightMouseDown.
+    }
+
+    override public func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        
+        let copyItem = NSMenuItem(
+            title: String(localized: "Copy"),
+            action: #selector(copyAction(_:)),
+            keyEquivalent: "c"
+        )
+        copyItem.target = self
+        copyItem.isEnabled = hasSelection()
+        menu.addItem(copyItem)
+        
+        let pasteItem = NSMenuItem(
+            title: String(localized: "Paste"),
+            action: #selector(pasteAction(_:)),
+            keyEquivalent: "v"
+        )
+        pasteItem.target = self
+        menu.addItem(pasteItem)
+        
+        return menu
+    }
+    
+    private func hasSelection() -> Bool {
+        guard let surface = surface.value else { return false }
+        return ghostty_surface_has_selection(surface)
+    }
+    
+    @objc private func copyAction(_ sender: AnyObject) {
+        guard let selectedText = self.selectedText else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(selectedText, forType: .string)
+    }
+    
+    @objc private func pasteAction(_ sender: AnyObject) {
+        let pasteboard = NSPasteboard.general
+        if let text = pasteboard.string(forType: .string) {
+            guard let surface = surface.value else { return }
+            text.withCString { cStr in
+                ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
+            }
+        }
     }
 
     override public func otherMouseDown(with event: NSEvent) {
@@ -480,6 +538,7 @@ extension GhosttySurfaceView {
                 ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
             }
         }
+        NSAccessibility.post(element: self, notification: .valueChanged)
     }
     
     public func setMarkedText(_ markedText: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -521,7 +580,25 @@ extension GhosttySurfaceView {
         return NSRange(location: NSNotFound, length: 0)
     }
     
+    public var selectedText: String? {
+        guard let surface = surface.value else { return nil }
+        guard ghostty_surface_has_selection(surface) else { return nil }
+        var textStruct = ghostty_text_s()
+        if ghostty_surface_read_selection(surface, &textStruct) {
+            defer {
+                ghostty_surface_free_text(surface, &textStruct)
+            }
+            if let textPtr = textStruct.text {
+                return String(bytes: UnsafeRawBufferPointer(start: textPtr, count: Int(textStruct.text_len)), encoding: .utf8)
+            }
+        }
+        return nil
+    }
+
     public func selectedRange() -> NSRange {
+        if let selectedText = self.selectedText {
+            return NSRange(location: 0, length: selectedText.utf16.count)
+        }
         return NSRange(location: NSNotFound, length: 0)
     }
     
@@ -530,6 +607,13 @@ extension GhosttySurfaceView {
     }
     
     public func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        guard let selectedText = self.selectedText else { return nil }
+        let nsStr = selectedText as NSString
+        let safeRange = NSIntersectionRange(range, NSRange(location: 0, length: nsStr.length))
+        if safeRange.length > 0 {
+            let sub = nsStr.substring(with: safeRange)
+            return NSAttributedString(string: sub)
+        }
         return nil
     }
     
@@ -540,13 +624,30 @@ extension GhosttySurfaceView {
     public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         guard let surface = surface.value else { return .zero }
         
+        let scale = self.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? Self.fallbackBackingScaleFactor
+        
+        // If we have selected text, return the selection's physical top-left converted to screen coordinates.
+        var textStruct = ghostty_text_s()
+        if ghostty_surface_read_selection(surface, &textStruct) {
+            defer {
+                ghostty_surface_free_text(surface, &textStruct)
+            }
+            let logicalX = CGFloat(textStruct.tl_px_x) / scale
+            let textHeight = CGFloat(surfaceConfig.fontSize > 0 ? surfaceConfig.fontSize : 14)
+            let logicalY = bounds.height - (CGFloat(textStruct.tl_px_y) / scale) - textHeight
+            
+            let rectInView = NSRect(x: logicalX, y: logicalY, width: 100, height: textHeight)
+            let rectInWindow = self.convert(rectInView, to: nil)
+            return self.window?.convertToScreen(rectInWindow) ?? .zero
+        }
+        
+        // Otherwise fallback to the IME cursor point.
         var x: Double = 0
         var y: Double = 0
         var w: Double = 0
         var h: Double = 0
         ghostty_surface_ime_point(surface, &x, &y, &w, &h)
         
-        let scale = self.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? Self.fallbackBackingScaleFactor
         let logicalW = CGFloat(w) / scale
         let logicalH = CGFloat(h) / scale
         
