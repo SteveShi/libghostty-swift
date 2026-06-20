@@ -5,6 +5,8 @@ import GhosttyKit
 @MainActor
 public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     public let runtime: GhosttyRuntime
+    public var isReadOnly: Bool = false
+    public var menuBuilder: (@MainActor (GhosttySurfaceView, NSEvent) -> NSMenu?)?
     private struct SurfaceHandle: @unchecked Sendable {
         var value: ghostty_surface_t?
     }
@@ -115,6 +117,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override public func keyDown(with event: NSEvent) {
+        if isReadOnly { return }
         guard let surface = surface.value else { return }
         
         let hasControlModifiers = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control)
@@ -237,11 +240,17 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func rightMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        // Send press to ghostty so it can update cursor or selection before menu pop-up.
         sendMouseButton(GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, with: event)
         
-        if let menu = self.menu(for: event) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        let targetMenu: NSMenu?
+        if let custom = menuBuilder {
+            targetMenu = custom(self, event)
+        } else {
+            targetMenu = self.menu(for: event)
+        }
+        
+        if let targetMenu {
+            NSMenu.popUpContextMenu(targetMenu, with: event, for: self)
         }
         
         sendMouseButton(GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, with: event)
@@ -260,8 +269,17 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
             keyEquivalent: "c"
         )
         copyItem.target = self
-        copyItem.isEnabled = hasSelection()
+        copyItem.isEnabled = selectedText != nil
         menu.addItem(copyItem)
+        
+        let searchItem = NSMenuItem(
+            title: String(localized: "Search with Google"),
+            action: #selector(searchWithGoogleAction(_:)),
+            keyEquivalent: ""
+        )
+        searchItem.target = self
+        searchItem.isEnabled = selectedText != nil
+        menu.addItem(searchItem)
         
         let pasteItem = NSMenuItem(
             title: String(localized: "Paste"),
@@ -271,28 +289,52 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         pasteItem.target = self
         menu.addItem(pasteItem)
         
+        menu.addItem(NSMenuItem.separator())
+        
+        let servicesItem = NSMenuItem(title: String(localized: "Services"), action: nil, keyEquivalent: "")
+        let servicesSubmenu = NSMenu()
+        NSApp.servicesMenu = servicesSubmenu
+        servicesItem.submenu = servicesSubmenu
+        menu.addItem(servicesItem)
+        
         return menu
     }
     
-    private func hasSelection() -> Bool {
-        guard let surface = surface.value else { return false }
-        return ghostty_surface_has_selection(surface)
+    public func resetTerminal() {
+        guard let surface = surface.value else { return }
+        let resetSeq = "\u{001B}c"
+        resetSeq.withCString { cStr in
+            ghostty_surface_text(surface, cStr, UInt(resetSeq.utf8.count))
+        }
+    }
+
+    public func writeText(_ text: String) {
+        guard let surface = surface.value else { return }
+        text.withCString { cStr in
+            ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
+        }
     }
     
-    @objc private func copyAction(_ sender: AnyObject) {
+    @objc public func searchWithGoogleAction(_ sender: Any) {
+        guard let selectedText = self.selectedText,
+              let encoded = selectedText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.google.com/search?q=\(encoded)") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+    
+    @objc public func copyAction(_ sender: Any) {
         guard let selectedText = self.selectedText else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(selectedText, forType: .string)
     }
     
-    @objc private func pasteAction(_ sender: AnyObject) {
+    @objc public func pasteAction(_ sender: Any) {
         let pasteboard = NSPasteboard.general
         if let text = pasteboard.string(forType: .string) {
-            guard let surface = surface.value else { return }
-            text.withCString { cStr in
-                ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
-            }
+            writeText(text)
         }
     }
 
@@ -518,6 +560,7 @@ public struct GhosttySurfaceConfiguration: Sendable {
 // MARK: - NSTextInputClient Implementation
 extension GhosttySurfaceView {
     public func insertText(_ string: Any, replacementRange: NSRange) {
+        if isReadOnly { return }
         guard let surface = surface.value else { return }
         let text: String
         if let attrStr = string as? NSAttributedString {
