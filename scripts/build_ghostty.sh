@@ -30,6 +30,10 @@ if [[ -z "$ZIG_BIN" ]]; then
   exit 1
 fi
 
+if [[ -z "${SDKROOT:-}" ]]; then
+  export SDKROOT="$(xcrun --show-sdk-path 2>/dev/null || true)"
+fi
+
 (
   cd "$SRC"
   "$ZIG_BIN" build -Dapp-runtime=none -Demit-xcframework=true -Demit-macos-app=false -Dxcframework-target=native
