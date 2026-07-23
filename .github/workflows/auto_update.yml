@@ -63,7 +63,7 @@ jobs:
             echo "updates_available=true" >> "$GITHUB_OUTPUT"
             echo "latest_ghostty=$LATEST_GHOSTTY" >> "$GITHUB_OUTPUT"
           else
-            if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.force }}" == "true" ]]; then
+            if [[ "${{ github.event.inputs.force }}" == "true" ]]; then
               echo "updates_available=true" >> "$GITHUB_OUTPUT"
             else
               echo "updates_available=false" >> "$GITHUB_OUTPUT"
