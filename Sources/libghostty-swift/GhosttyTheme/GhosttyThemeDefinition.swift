@@ -36,14 +36,12 @@ public struct GhosttyThemeDefinition: Sendable, Hashable, Identifiable {
 
     /// Whether this theme appears to be a dark theme based on background luminance.
     public var isDark: Bool {
-        guard background.count >= 6 else { return true }
-        let hex = background.hasPrefix("#") ? String(background.dropFirst()) : background
-        guard hex.count >= 6,
-              let r = UInt8(hex.prefix(2), radix: 16),
-              let g = UInt8(hex.dropFirst(2).prefix(2), radix: 16),
-              let b = UInt8(hex.dropFirst(4).prefix(2), radix: 16)
-        else { return true }
-        let luminance = 0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)
+        let hex = background.hasPrefix("#") ? background.dropFirst() : background[...]
+        guard hex.count >= 6, let rgb = UInt32(hex.prefix(6), radix: 16) else { return true }
+        let r = Double((rgb >> 16) & 0xFF)
+        let g = Double((rgb >> 8) & 0xFF)
+        let b = Double(rgb & 0xFF)
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
         return luminance < 128
     }
 }

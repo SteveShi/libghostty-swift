@@ -7,17 +7,14 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     public let runtime: GhosttyRuntime
     public var isReadOnly: Bool = false
     public var menuBuilder: (@MainActor (GhosttySurfaceView, NSEvent) -> NSMenu?)?
-    private struct SurfaceHandle: @unchecked Sendable {
-        var value: ghostty_surface_t?
-    }
-    private var surface = SurfaceHandle(value: nil)
+    private nonisolated(unsafe) var surface: ghostty_surface_t? = nil
     private var surfaceConfig = GhosttySurfaceConfiguration()
     private var markedText: String? = nil
     private var accumulatedTexts: [String]? = nil
     private var interpretedCommandSelector: Selector? = nil
 
     public var rawSurface: ghostty_surface_t? {
-        surface.value
+        surface
     }
 
     private static let fallbackBackingScaleFactor: CGFloat = 2.0
@@ -49,7 +46,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     deinit {
-        let surfaceToFree = surface.value
+        let surfaceToFree = surface
         let key = registryKey
         DispatchQueue.main.async { [runtime] in
             if let surfaceToFree, runtime.activeSurface == surfaceToFree {
@@ -66,7 +63,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
-        if result, let surface = surface.value {
+        if result, let surface = surface {
             ghostty_surface_set_focus(surface, true)
             runtime.activeSurface = surface
         }
@@ -75,7 +72,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
-        if result, let surface = surface.value {
+        if result, let surface = surface {
             ghostty_surface_set_focus(surface, false)
             if runtime.activeSurface == surface {
                 runtime.activeSurface = nil
@@ -118,7 +115,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override public func keyDown(with event: NSEvent) {
         if isReadOnly { return }
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         
         let hasControlModifiers = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control)
         
@@ -177,13 +174,13 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override public func keyUp(with event: NSEvent) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let keyEvent = event.ghosttyKeyEvent(GHOSTTY_ACTION_RELEASE)
         ghostty_surface_key(surface, keyEvent)
     }
 
     override public func flagsChanged(with event: NSEvent) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let keyEvent = event.ghosttyKeyEvent(GHOSTTY_ACTION_PRESS)
         ghostty_surface_key(surface, keyEvent)
     }
@@ -194,7 +191,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     /// while AppKit's is bottom-left, so the Y axis is flipped (same convention as
     /// `scrollWheel`).
     private func sendMousePos(_ event: NSEvent) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let loc = convert(event.locationInWindow, from: nil)
         ghostty_surface_mouse_pos(surface, loc.x, bounds.height - loc.y, event.ghosttyMouseMods)
     }
@@ -204,7 +201,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     private func sendMouseButton(_ state: ghostty_input_mouse_state_e,
                                  _ button: ghostty_input_mouse_button_e,
                                  with event: NSEvent) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         sendMousePos(event)
         _ = ghostty_surface_mouse_button(surface, state, button, event.ghosttyMouseMods)
     }
@@ -301,7 +298,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
     
     public func resetTerminal() {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let resetSeq = "\u{001B}c"
         resetSeq.withCString { cStr in
             ghostty_surface_text(surface, cStr, UInt(resetSeq.utf8.count))
@@ -309,7 +306,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     public func writeText(_ text: String) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         text.withCString { cStr in
             ghostty_surface_text(surface, cStr, UInt(text.utf8.count))
         }
@@ -347,7 +344,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override public func scrollWheel(with event: NSEvent) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
 
         // First tell Ghostty where the mouse is so it can resolve the correct surface
         let loc = convert(event.locationInWindow, from: nil)
@@ -436,7 +433,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
                     envVars.withUnsafeMutableBufferPointer { buffer in
                         config.env_vars = buffer.baseAddress
                         config.env_var_count = buffer.count
-                        self.surface.value = ghostty_surface_new(app, &config)
+                        self.surface = ghostty_surface_new(app, &config)
                     }
                 }
             }
@@ -448,7 +445,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         }
 
         // Register for cross-thread C callbacks only once a surface exists.
-        if surface.value != nil {
+        if surface != nil {
             runtime.registerSurfaceView(self, forKey: registryKey)
         }
     }
@@ -467,7 +464,7 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func updateContentScale() {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let backingFrame = convertToBacking(bounds)
         guard bounds.width > 0, bounds.height > 0 else { return }
         let xScale = backingFrame.width / bounds.width
@@ -476,14 +473,14 @@ public class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func updateSurfaceSize() {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let size = convertToBacking(bounds.size)
         guard size.width > 0, size.height > 0 else { return }
         ghostty_surface_set_size(surface, UInt32(size.width), UInt32(size.height))
     }
 
     public func applyTheme(_ theme: GhosttyThemeDefinition) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         
         var configLines: [String] = []
         configLines.append("background = \(theme.background)")
@@ -561,7 +558,7 @@ public struct GhosttySurfaceConfiguration: Sendable {
 extension GhosttySurfaceView {
     public func insertText(_ string: Any, replacementRange: NSRange) {
         if isReadOnly { return }
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let text: String
         if let attrStr = string as? NSAttributedString {
             text = attrStr.string
@@ -585,7 +582,7 @@ extension GhosttySurfaceView {
     }
     
     public func setMarkedText(_ markedText: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         let text: String
         if let attrStr = markedText as? NSAttributedString {
             text = attrStr.string
@@ -607,7 +604,7 @@ extension GhosttySurfaceView {
     }
     
     public func unmarkText() {
-        guard let surface = surface.value else { return }
+        guard let surface = surface else { return }
         self.markedText = nil
         ghostty_surface_preedit(surface, nil, 0)
     }
@@ -624,7 +621,7 @@ extension GhosttySurfaceView {
     }
     
     public var selectedText: String? {
-        guard let surface = surface.value else { return nil }
+        guard let surface = surface else { return nil }
         guard ghostty_surface_has_selection(surface) else { return nil }
         var textStruct = ghostty_text_s()
         if ghostty_surface_read_selection(surface, &textStruct) {
@@ -665,7 +662,7 @@ extension GhosttySurfaceView {
     }
     
     public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        guard let surface = surface.value else { return .zero }
+        guard let surface = surface else { return .zero }
         
         let scale = self.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? Self.fallbackBackingScaleFactor
         
